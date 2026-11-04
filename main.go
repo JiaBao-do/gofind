@@ -1,9 +1,7 @@
 package main
 
 import (
-	"bytes"
 	"fmt"
-	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -12,6 +10,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 )
 
 var (
@@ -28,6 +27,8 @@ type model struct {
 	filter  string
 	cursor  int
 	preview string
+	pvPath  string // file shown in the preview, re-read on resize so wrapping follows terminal zoom
+	pvDir   bool
 	scroll  int    // first preview line shown
 	focusR  bool   // Tab moved focus to the preview pane
 	info    string // one-line summary shown above the preview
@@ -61,6 +62,7 @@ func (m *model) load(dir string, selectName string) {
 		return strings.ToLower(entries[i].Name()) < strings.ToLower(entries[j].Name())
 	})
 	m.dir, m.entries, m.filter, m.cursor, m.preview, m.info, m.err = dir, entries, "", 0, "", "", nil
+	m.pvPath = ""
 	m.scroll, m.focusR = 0, false
 	m.infos = map[string]fs.FileInfo{}
 	for i, e := range entries {
@@ -206,35 +208,6 @@ func (m model) selected() os.DirEntry {
 	return v[m.cursor]
 }
 
-func readPreview(path string, isDir bool) string {
-	if isDir {
-		entries, err := os.ReadDir(path)
-		if err != nil {
-			return err.Error()
-		}
-		var b strings.Builder
-		for _, e := range entries {
-			name := e.Name()
-			if e.IsDir() {
-				name += "/"
-			}
-			b.WriteString(name)
-			b.WriteByte('\n')
-		}
-		return b.String()
-	}
-	f, err := os.Open(path)
-	if err != nil {
-		return err.Error()
-	}
-	defer f.Close()
-	buf, _ := io.ReadAll(io.LimitReader(f, 64*1024))
-	if bytes.IndexByte(buf, 0) >= 0 {
-		return "(binary file)"
-	}
-	return strings.ReplaceAll(strings.ReplaceAll(string(buf), "\r", ""), "\t", "    ")
-}
-
 func (m model) Init() tea.Cmd { return nil }
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -245,6 +218,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	case tea.WindowSizeMsg:
 		m.w, m.h = msg.Width, msg.Height
+		if m.pvPath != "" {
+			m.preview = readPreview(m.pvPath, m.pvDir, m.rightW())
+			m.scroll = min(m.scroll, m.maxScroll())
+		}
 	case tea.KeyMsg:
 		if m.focusR {
 			page := max(m.previewH(), 1)
@@ -299,7 +276,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case tea.KeyEnter:
 			if e := m.selected(); e != nil {
 				path := filepath.Join(m.dir, e.Name())
-				m.preview, m.scroll = readPreview(path, e.IsDir()), 0
+				m.pvPath, m.pvDir = path, e.IsDir()
+				m.preview, m.scroll = readPreview(path, e.IsDir(), m.rightW()), 0
 				if e.IsDir() {
 					m.info = "calculating size…"
 					return m, dirSize(path)
@@ -319,6 +297,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// rightW is the preview pane's inner width; the list takes 3/5 of the screen.
+func (m model) rightW() int { return m.w - (m.w*3/5 - 2) - 4 }
+
 // previewH is how many preview lines fit: screen minus header, footer, borders and the info line.
 func (m model) previewH() int { return m.h - 5 }
 
@@ -326,16 +307,14 @@ func (m model) maxScroll() int {
 	return max(strings.Count(m.preview, "\n")+1-m.previewH(), 0)
 }
 
-// clip cuts text to at most h lines of at most w runes each.
+// clip cuts text to at most h lines of at most w display columns, keeping colour codes intact.
 func clip(text string, w, h int) string {
 	lines := strings.Split(text, "\n")
 	if len(lines) > h {
 		lines = lines[:h]
 	}
 	for i, l := range lines {
-		if r := []rune(l); len(r) > w {
-			lines[i] = string(r[:w])
-		}
+		lines[i] = ansi.Truncate(l, w, "")
 	}
 	return strings.Join(lines, "\n")
 }
@@ -347,7 +326,7 @@ func (m model) View() string {
 	innerH := m.h - 4   // 2 border rows + header + footer
 	listH := innerH - 1 // column header row
 	leftW := m.w*3/5 - 2
-	rightW := m.w - leftW - 4
+	rightW := m.rightW()
 	if listH < 1 || leftW < 1 || rightW < 1 {
 		return "terminal too small"
 	}
@@ -404,13 +383,40 @@ func (m model) View() string {
 
 var version = "dev" // set by -ldflags at release build
 
+func printHelp() {
+	fmt.Print(`gofind - terminal file explorer
+
+Usage:
+  gofind [dir]      browse dir (default: current folder)
+  gofind version    print the version
+  gofind upgrade    install the latest release
+  gofind help       show this help
+
+Keys:
+  up/down   move            left   parent folder     right  open folder
+  enter     preview         tab    focus preview (up/down/pgup/pgdn/home/end scroll)
+  type      fuzzy filter    esc    clear filter / quit    ctrl+c quit
+`)
+}
+
 func main() {
+	cleanupOldBinary()
 	start := "."
 	if len(os.Args) > 1 {
 		start = os.Args[1]
 	}
-	if start == "version" || start == "--version" {
-		fmt.Println(version)
+	switch start {
+	case "version", "--version", "-v":
+		fmt.Printf("gofind %s\n", version)
+		return
+	case "help", "--help", "-h":
+		printHelp()
+		return
+	case "upgrade", "update":
+		if err := upgradeCLI(); err != nil {
+			fmt.Fprintln(os.Stderr, "Error:", err)
+			os.Exit(1)
+		}
 		return
 	}
 	abs, err := filepath.Abs(start)

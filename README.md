@@ -26,6 +26,23 @@ Options: `GOFIND_VERSION=v0.1.0` (specific release), `GOFIND_INSTALL_DIR=...`,
 
 With Go: `go install github.com/JiaBao-do/gofind@latest`
 
+## Commands
+
+```
+gofind [dir]      browse dir (default: current folder)
+gofind version    print the version
+gofind upgrade    install the latest release
+gofind help       show help
+```
+
+## Preview
+
+Text and code as-is, Markdown styled, CSV/TSV and Excel (`.xlsx`, first sheet)
+as aligned tables, Word (`.docx`) as text, PDF via `pdftotext` if installed
+(poppler). Folders show their recursive size.
+
+Zooming the terminal (Ctrl +/-) re-lays out the panes and re-wraps the preview.
+
 ## Keys
 
 ```
@@ -33,6 +50,7 @@ With Go: `go install github.com/JiaBao-do/gofind@latest`
 ←        go to parent folder
 →        open folder
 enter    preview file / folder in the right pane
+tab      focus the preview; up/down/pgup/pgdn/home/end scroll it
 type     fuzzy filter the list (backspace edits, esc clears)
 esc      quit (when the filter is empty), ctrl+c always quits
 ```
